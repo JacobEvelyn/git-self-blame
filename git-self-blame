@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# Hi there! Thanks for reading the source. :)
+#
+# I'm pretty inexperienced with shell scripting so I wouldn't be surprised
+# if there are better ways to do things here. I also tried my best to make
+# this as portable as possible (for example, using loop constructs instead
+# of the `repeat` builtin that some shells do not support) but ultimately
+# I only tested this on whatever versions of Zsh/Bash (and `git`, and
+# macOS/Linux) happen to be installed on my machine and on coderpad.io
+# (which is an excellent tool, by the way!). Please let me know if there's
+# something that can be improved!
+#
+# My initial strategy was just to get a list of author names by parsing
+# `git blame --porcelain` and then run `git blame` while replacing each
+# instance of an author name with your own `git config user.name`. This
+# turned out to be surprisingly hard (it probably doesn't help that I
+# still don't really understand how `awk` and `sed` work) and didn't
+# handle some cases (like when you use `git blame --show-email`). I
+# also noticed that `git blame --porcelain` gives me both author and
+# committer information and couldn't find any explanation in the
+# documentation of if/when committers show up in the non-porcelain
+# `git blame` command. So with this strategy there looked to be lots of
+# edge cases to handle.
+#
+# I then learned about the `.mailmap` file that `git` allows you to
+# define, which is a way of telling `git`, "Hey, if you see commits
+# from this person's old name/email, let's print them with their current
+# name/email instead." It's intended for cases where someone changes
+# their name or email address and you don't want to get confused by
+# having three or four "different" Jacob Evelyns in your history.
+# The `.mailmap` file, when present, is used for `git blame` commands
+# (as well as a few others). The `.mailmap` file approach will handle
+# all of those tricky cases from before and in general feels a bit more
+# robust since it's using `git`'s own API.
+#
+# So my second approach was to parse `git blame --porcelain` as before
+# to get author/committer names, generate a `.mailmap` file that tells
+# `git` to use our own name and email in place of every other author
+# name/email, stick that `.mailmap` file at the root of the `git` repo,
+# and then delete the file after executing our `git blame`. Nice. But
+# what if there's already a `.mailmap` file in the repo? Shuffling it
+# around seems kind of awkward, and risky in case anything goes wrong.
+# We could also just override the local `git config mailmap.file` to
+# tell `git` to use a `.mailmap` file that we create in a temp directory.
+# That works a little better, but still requires us to temporarily change
+# the user's `git config` setup, meaning if this is run in parallel with
+# a different `git` operation (background `git` operations can happen
+# more often than you might think, often from editors/IDEs and fancy
+# shell configurations) we could be accidentally interfering with that
+# operation. That's yucky.
+#
+# And then I came across the global `git -c` flag, which lets you
+# specify configuration overrides for that command only. With this we
+# can generate our `.mailmap` file in a temp directory and run
+# `git -c mailmap.file=/path/to/tmp/.mailmap` blame ...` without ever
+# changing any state outside of our command. Yay! And as long as we
+# use unique names for our `.mailmap` temp file each time (uniqueness
+# is guaranteed by the `mktemp` command) we can have multiple
+# `git self-blame` commands running at once for different files or
+# repositories without risk of them interfering with each other. Double
+# yay!
+#
+# Without further ado, here's the code:
+
+# We'll need some temp files!
+intermediate_tmpfile=`mktemp`
+mailmap_tmpfile=`mktemp`
+
+# Store git user/email in variable so we don't have to query git for it
+# multiple times when printing it on each line of our new mailmap file.
+myself="`git config user.name` <`git config user.email`>"
+
+# If our `git blame --porcelain` call fails (for instance if no arguments
+# are passed in) with a non-zero status code, we don't want that to get
+# swallowed up by the fact that its output is piped into things that will
+# give a 0 status code. This line changes the shell behavior so that the
+# status code of a set of commands piped together will be the value of the
+# last command that exited with a non-zero status code (or 0 if they all
+# succeed). This allows our `if` statement below to work correctly.
+set -o pipefail
+
+# Run `--porcelain` version of `git blame` command to get all unique
+# authors/committers, and write them to a new mailmap tmp file.
+git blame --porcelain "$@" |
+  sed -nE 's/^(author|committer)( |-mail)//p' |
+  sed 'N;s/\n//' |
+  sort |
+  uniq > $intermediate_tmpfile &&
+  paste -d ' ' <(for i in `seq 1 $(wc -l < $intermediate_tmpfile)`; do echo "$myself"; done) $intermediate_tmpfile > $mailmap_tmpfile
+
+# If we've completed our setup successfully, run `git blame` "for real"
+# with the temp `.mailmap` file we created. If the previous line exited
+# with a non-zero status code, we don't want to execute this line because
+# (a) it probably won't work as we expect, and (b) it's likely that the
+# thing that failed above was the `git blame --porcelain` call (for instance
+# if no arguments were passed in) and the user's gotten an error message
+# printed to STDERR and we don't want to then run basically the same command
+# and have them see the same error message twice.
+if [ $? -eq 0 ]; then
+  git -c mailmap.file=$mailmap_tmpfile blame "$@"
+fi
+
+# Delete the temp files to clean up after ourselves. This isn't strictly
+# necessary but it feels good to be a good citizen.
+rm $intermediate_tmpfile
+rm $mailmap_tmpfile
