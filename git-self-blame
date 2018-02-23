@@ -64,12 +64,12 @@
 # Without further ado, here's the code:
 
 # We'll need some temp files!
-intermediate_tmpfile=`mktemp`
-mailmap_tmpfile=`mktemp`
+intermediate_tmpfile=$(mktemp)
+mailmap_tmpfile=$(mktemp)
 
 # Store git user/email in variable so we don't have to query git for it
 # multiple times when printing it on each line of our new mailmap file.
-myself="`git config user.name` <`git config user.email`>"
+myself="$(git config user.name) <$(git config user.email)>"
 
 # If our `git blame --porcelain` call fails (for instance if no arguments
 # are passed in) with a non-zero status code, we don't want that to get
@@ -82,26 +82,24 @@ set -o pipefail
 
 # Run `--porcelain` version of `git blame` command to get all unique
 # authors/committers, and write them to a new mailmap tmp file.
-git blame --porcelain "$@" |
+if git blame --porcelain "$@" |
   sed -nE 's/^(author|committer)( |-mail)//p' |
   sed 'N;s/\n//' |
   sort |
-  uniq > $intermediate_tmpfile &&
-  paste -d ' ' <(for i in `seq 1 $(wc -l < $intermediate_tmpfile)`; do echo "$myself"; done) $intermediate_tmpfile > $mailmap_tmpfile
-
-# If we've completed our setup successfully, run `git blame` "for real"
-# with the temp `.mailmap` file we created. If the previous line exited
-# with a non-zero status code, we don't want to execute this line because
-# (a) it probably won't work as we expect, and (b) it's likely that the
-# thing that failed above was the `git blame --porcelain` call (for instance
-# if no arguments were passed in) and the user's gotten an error message
-# printed to STDERR and we don't want to then run basically the same command
-# and have them see the same error message twice.
-if [ $? -eq 0 ]; then
-  git -c mailmap.file=$mailmap_tmpfile blame "$@"
+  uniq > "$intermediate_tmpfile" &&
+  paste -d ' ' <(for _ in $(seq 1 "$(wc -l < "$intermediate_tmpfile")"); do echo "$myself"; done) "$intermediate_tmpfile" > "$mailmap_tmpfile"; then
+  # If we've completed our setup successfully, run `git blame` "for real"
+  # with the temp `.mailmap` file we created. If the previous line exited
+  # with a non-zero status code, we don't want to execute this line because
+  # (a) it probably won't work as we expect, and (b) it's likely that the
+  # thing that failed above was the `git blame --porcelain` call (for instance
+  # if no arguments were passed in) and the user's gotten an error message
+  # printed to STDERR and we don't want to then run basically the same command
+  # and have them see the same error message twice.
+  git -c mailmap.file="$mailmap_tmpfile" blame "$@"
 fi
 
 # Delete the temp files to clean up after ourselves. This isn't strictly
 # necessary but it feels good to be a good citizen.
-rm $intermediate_tmpfile
-rm $mailmap_tmpfile
+rm "$intermediate_tmpfile"
+rm "$mailmap_tmpfile"
